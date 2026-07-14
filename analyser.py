@@ -166,6 +166,91 @@ def compare_frailty(pre: Any, post: Any) -> str:
     return "No Change"
 
 
+def frailty_transition(pre: Any, post: Any) -> tuple[str, bool]:
+    """Return a readable frailty transition and whether a frail senior became normal/robust."""
+    p, q = normalise_frailty(pre), normalise_frailty(post)
+    if p is None or q is None:
+        return "Missing Data", False
+    pre_text = str(pre).strip().title()
+    post_text = str(post).strip().title()
+    transition = f"{pre_text} → {post_text}"
+    recovered = p >= 2 and q == 0
+    return transition, recovered
+
+
+def _fmt_value(value: Any) -> str:
+    number = to_number(value)
+    if number is not None:
+        return f"{number:g}"
+    return str(value).strip() if not is_missing(value) else "missing"
+
+
+def metric_finding(metric: Metric, pre: Any, post: Any, status: str) -> str:
+    """Create a plain-language reason for one pre/post finding."""
+    if status == "Missing Data":
+        return f"{metric.label}: incomplete pre/post data"
+    pre_text, post_text = _fmt_value(pre), _fmt_value(post)
+    if status == "No Change":
+        return f"{metric.label} was unchanged at {post_text}"
+    if metric.direction == "higher":
+        verb = "increased" if status == "Improved" else "decreased"
+    else:
+        verb = "decreased" if status == "Improved" else "increased"
+    return f"{metric.label} {verb} from {pre_text} to {post_text}"
+
+
+def domain_reason(record: dict[str, Any], outcomes: list[tuple[Metric, str]], domain: str) -> str:
+    findings: list[str] = []
+    for metric, status in outcomes:
+        if metric.domain != domain or status == "Missing Data":
+            continue
+        findings.append(metric_finding(metric, record.get(f"{metric.label} Pre"), record.get(f"{metric.label} Post"), status))
+    if not findings:
+        return "Insufficient comparable pre/post data."
+    return "; ".join(findings) + "."
+
+
+def detailed_analysis_reason(record: dict[str, Any], outcomes: list[tuple[Metric, str]]) -> str:
+    """Explain why the senior received the overall classification using exact findings."""
+    overall = record.get("Overall Outcome", "")
+    improved = [(m, s) for m, s in outcomes if s == "Improved"]
+    declined = [(m, s) for m, s in outcomes if s == "Declined"]
+    unchanged = sum(s == "No Change" for _, s in outcomes)
+    comparable = sum(s != "Missing Data" for _, s in outcomes)
+
+    if overall == "Insufficient Data":
+        return f"Insufficient data because only {comparable}/{len(METRICS)} assessment areas had complete pre/post results."
+    if overall == "No Change":
+        return f"No change because all {comparable} comparable assessment areas remained the same."
+
+    lead = {
+        "Improved": "Classified as Improved because positive changes outweighed declines.",
+        "Declined": "Classified as Declined because negative changes outweighed improvements.",
+        "Maintained": "Classified as Maintained because the results were stable or mixed without a clear overall shift.",
+    }.get(overall, f"Classified as {overall}.")
+
+    parts = [lead]
+    transition = record.get("Frailty Transition")
+    if record.get("Recovered from Frailty"):
+        parts.append(f"Frailty status improved from {transition}; this is a key positive programme outcome.")
+    elif record.get("Frailty Outcome") == "Improved":
+        parts.append(f"Frailty status improved from {transition}.")
+    elif record.get("Frailty Outcome") == "Declined":
+        parts.append(f"Frailty status worsened from {transition}.")
+
+    if improved:
+        texts = [metric_finding(m, record.get(f"{m.label} Pre"), record.get(f"{m.label} Post"), s) for m, s in improved[:5]]
+        parts.append("Improvements: " + "; ".join(texts) + ".")
+    if declined:
+        texts = [metric_finding(m, record.get(f"{m.label} Pre"), record.get(f"{m.label} Post"), s) for m, s in declined[:5]]
+        parts.append("Declines: " + "; ".join(texts) + ".")
+    parts.append(
+        f"Overall, {len(improved)} area(s) improved, {len(declined)} declined and {unchanged} were unchanged; "
+        f"{comparable}/{len(METRICS)} areas were comparable."
+    )
+    return " ".join(parts)
+
+
 def domain_result(outcomes: list[tuple[Metric, str]], domain: str) -> str:
     selected = [(m, s) for m, s in outcomes if m.domain == domain and s != "Missing Data"]
     if not selected:
@@ -320,8 +405,17 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
             outcomes.append((metric, status))
 
         record["Frailty Outcome"] = compare_frailty(record.get("Frailty Status"), record.get("Frailty Status 2"))
+        transition, recovered = frailty_transition(record.get("Frailty Status"), record.get("Frailty Status 2"))
+        record["Frailty Transition"] = transition
+        record["Recovered from Frailty"] = recovered
+        record["Frailty Evidence"] = (
+            "Verified with complete SPPB" if recovered and record.get("SPPB Change") is not None
+            else "Limited: SPPB pre/post incomplete" if recovered
+            else "Not applicable"
+        )
         for domain in ["Physical Function", "Pain", "Daily Living", "Wellbeing"]:
             record[f"{domain} Domain"] = domain_result(outcomes, domain)
+            record[f"{domain} Reason"] = domain_reason(record, outcomes, domain)
 
         result, reason, completeness, score = overall_result(outcomes)
         record["Improved Areas"] = sum(status == "Improved" for _, status in outcomes)
@@ -331,7 +425,7 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
         record["Data Completeness"] = completeness
         record["Improvement Score"] = score
         record["Overall Outcome"] = result
-        record["Analysis Reason"] = reason
+        record["Analysis Reason"] = detailed_analysis_reason(record, outcomes)
         record["Critical Decline"] = any(
             record.get(field) == "Declined"
             for field in ["SPPB Outcome", "Mobility Outcome", "Overall Pain Outcome", "Frailty Outcome"]
@@ -343,7 +437,7 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
     if df.empty:
         raise ValueError("No senior records were found below the header row.")
 
-    for old_name in ["Senior Analysis", "Analysis Dashboard", "Follow-up List", "Top Improvers"]:
+    for old_name in ["Senior Analysis", "Analysis Dashboard", "Follow-up List", "Top Improvers", "Frailty Improvements"]:
         if old_name in source_wb.sheetnames:
             del source_wb[old_name]
 
@@ -364,6 +458,13 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
         ["Improvement Score", "Improved Areas", "SPPB Change"], ascending=[False, False, False]
     ).head(10)[top_cols]
     _write_dataframe_sheet(source_wb, "Top Improvers", top_df)
+
+    frailty_cols = [
+        "Name", "Gender", "Age (in 2026)", "Frailty Status", "Frailty Status 2", "Frailty Transition", "Frailty Evidence",
+        "SPPB Pre", "SPPB Post", "SPPB Change", "Overall Outcome", "Analysis Reason",
+    ]
+    frailty_df = df[df["Recovered from Frailty"]][frailty_cols].copy()
+    _write_dataframe_sheet(source_wb, "Frailty Improvements", frailty_df)
 
     dashboard = source_wb.create_sheet("Analysis Dashboard", 0)
     dark = "1F4E78"
@@ -409,15 +510,23 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
     dashboard["B15"] = float(complete["Health Score Change"].mean()) if not complete.empty else None
     dashboard["A16"] = "Seniors flagged for follow-up"
     dashboard["B16"] = len(follow_df)
+    pre_frail = df[df["Frailty Status"].apply(normalise_frailty).ge(2)]
+    pre_frail_complete = pre_frail[pre_frail["Frailty Status 2"].apply(normalise_frailty).notna()]
+    recovered_count = int(df["Recovered from Frailty"].sum())
+    verified_recovered = int(((df["Recovered from Frailty"]) & df["SPPB Change"].notna()).sum())
+    dashboard["A17"] = "Verified frail to normal"
+    dashboard["B17"] = verified_recovered
+    dashboard["C17"] = verified_recovered / len(pre_frail_complete) if len(pre_frail_complete) else None
+    dashboard["C17"].number_format = "0.0%"
 
-    dashboard["A18"] = "Classification note"
-    dashboard["A19"] = (
+    dashboard["A19"] = "Classification note"
+    dashboard["A20"] = (
         "SPPB and Health Score: higher is better. Pain, daily-function and questionnaire scores: lower is better. "
         "Symptom text is converted to a simple severity scale. Results with fewer than 25% comparable areas are "
         "marked Insufficient Data. Follow-up flags include overall decline or worsening in SPPB, mobility, pain or frailty."
     )
-    dashboard.merge_cells("A19:D22")
-    dashboard["A19"].alignment = Alignment(wrap_text=True, vertical="top")
+    dashboard.merge_cells("A20:D23")
+    dashboard["A20"].alignment = Alignment(wrap_text=True, vertical="top")
     dashboard.column_dimensions["A"].width = 28
     dashboard.column_dimensions["B"].width = 16
     dashboard.column_dimensions["C"].width = 14
@@ -485,6 +594,7 @@ def build_pdf_report(df: pd.DataFrame, report_name: str = "BIXEPS") -> bytes:
         ["Average overall pain change", f"{complete['Overall Pain Change'].mean():+.2f}" if not complete.empty else "N/A"],
         ["Average health-score change", f"{complete['Health Score Change'].mean():+.2f}" if not complete.empty else "N/A"],
         ["Seniors requiring review", str(int(((df['Overall Outcome'] == 'Declined') | df['Critical Decline']).sum()))],
+        ["Verified frail to normal", str(int(((df["Recovered from Frailty"]) & df["SPPB Change"].notna()).sum()))],
     ]
     key_table = Table(key, colWidths=[80 * mm, 45 * mm])
     key_table.setStyle(TableStyle([
