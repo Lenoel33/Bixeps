@@ -123,7 +123,7 @@ try:
     k5.metric("Declined", int(counts.get("Declined", 0)))
     k6.metric("Incomplete assessments", int(counts.get("Insufficient Data", 0)))
 
-    tabs = st.tabs(["Overview", "Frailty Impact", "Follow-up", "Top Improvers", "All Seniors", "Downloads"])
+    tabs = st.tabs(["Overview", "Frailty Impact", "Remarks Review", "Follow-up", "Top Improvers", "All Seniors", "Downloads"])
 
     with tabs[0]:
         st.markdown('<div class="section-title">Programme outcome overview</div>', unsafe_allow_html=True)
@@ -245,11 +245,33 @@ try:
             )
 
     with tabs[2]:
+        st.markdown('<div class="section-title">Context review of written remarks</div>', unsafe_allow_html=True)
+        st.caption("The system uses rule-based contextual checks. It distinguishes negated entries such as ‘No numbness’ from persistent or frequent symptoms such as ‘still numb’ or ‘2× a week’. It flags cases for staff review and does not make a medical diagnosis.")
+        text_counts = df["Text Risk Level"].value_counts()
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Priority review", int(text_counts.get("Escalate", 0)))
+        r2.metric("Monitor", int(text_counts.get("Monitor", 0)))
+        r3.metric("No concern detected", int(text_counts.get("No concern detected", 0)))
+        text_review = df[df["Text Risk Level"].isin(["Escalate", "Monitor"])][[
+            "Name", "Text Risk Level", "Text Risk Reason", "Text Evidence", "Overall Outcome", "Frailty Transition"
+        ]]
+        if text_review.empty:
+            st.success("No written remarks were flagged for review.")
+        else:
+            st.dataframe(text_review, use_container_width=True, hide_index=True, height=460)
+            st.download_button(
+                "Download remarks review list (CSV)",
+                text_review.to_csv(index=False).encode("utf-8-sig"),
+                file_name="BIXEPS_Remarks_Review.csv",
+                mime="text/csv",
+            )
+
+    with tabs[3]:
         st.markdown('<div class="section-title">Seniors requiring review</div>', unsafe_allow_html=True)
         if follow_up_mode == "Sensitive":
-            follow_mask = (df["Overall Outcome"] == "Declined") | df["Critical Decline"]
+            follow_mask = (df["Overall Outcome"] == "Declined") | df["Critical Decline"] | df["Text Risk Level"].isin(["Escalate", "Monitor"])
         else:
-            follow_mask = df["Overall Outcome"] == "Declined"
+            follow_mask = (df["Overall Outcome"] == "Declined") | (df["Text Risk Level"] == "Escalate")
         follow_df = df[follow_mask].copy()
         st.metric("Seniors flagged", len(follow_df))
         if follow_df.empty:
@@ -257,7 +279,8 @@ try:
         else:
             cols = [
                 "Name", "Gender", "Age (in 2026)", "Overall Outcome", "SPPB Outcome",
-                "Overall Pain Outcome", "Mobility Outcome", "Frailty Outcome", "Frailty Transition", "Follow-up Reason", "Analysis Reason",
+                "Overall Pain Outcome", "Mobility Outcome", "Frailty Outcome", "Frailty Transition",
+                "Text Risk Level", "Text Risk Reason", "Text Evidence", "Follow-up Reason", "Analysis Reason",
             ]
             st.dataframe(follow_df[cols], use_container_width=True, hide_index=True)
             st.download_button(
@@ -267,7 +290,7 @@ try:
                 mime="text/csv",
             )
 
-    with tabs[3]:
+    with tabs[4]:
         st.markdown('<div class="section-title">Top improving seniors</div>', unsafe_allow_html=True)
         ranked = df[df["Overall Outcome"] != "Insufficient Data"].sort_values(
             ["Improvement Score", "Improved Areas", "SPPB Change"], ascending=[False, False, False]
@@ -278,7 +301,7 @@ try:
         ]
         st.dataframe(ranked[top_cols], use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         st.markdown('<div class="section-title">Complete senior-level analysis with reasons</div>', unsafe_allow_html=True)
         view_df = df if show_incomplete else df[df["Overall Outcome"] != "Insufficient Data"]
         outcome_filter = st.multiselect(
@@ -290,8 +313,8 @@ try:
         display_columns = [
             "Name", "Gender", "Age (in 2026)", "Overall Outcome", "Frailty Transition",
             "SPPB Outcome", "Physical Function Domain", "Pain Domain", "Daily Living Domain", "Wellbeing Domain",
-            "Improved Areas", "Declined Areas", "Data Completeness", "Analysis Reason",
-            "Physical Function Reason", "Pain Reason", "Daily Living Reason", "Wellbeing Reason",
+            "Improved Areas", "Declined Areas", "Data Completeness", "Text Risk Level", "Text Risk Reason", "Text Evidence",
+            "Analysis Reason", "Physical Function Reason", "Pain Reason", "Daily Living Reason", "Wellbeing Reason",
         ]
         st.dataframe(
             view_df[display_columns].style.format({"Data Completeness": "{:.0%}"}),
@@ -300,7 +323,7 @@ try:
             height=560,
         )
 
-    with tabs[5]:
+    with tabs[6]:
         st.markdown('<div class="section-title">Download reports</div>', unsafe_allow_html=True)
         output_name = re.sub(r"\.xlsx$", "", uploaded.name, flags=re.I) + "_Analysed.xlsx"
         d1, d2 = st.columns(2)

@@ -59,6 +59,104 @@ OUTCOME_FILLS = {
 }
 
 
+TEXT_REVIEW_HEADER_TERMS = (
+    "remark", "comment", "note", "pain", "numb", "cramp", "mobility",
+    "self-care", "self care", "usual activities", "anxiety", "depression",
+    "discomfort", "symptom", "problem",
+)
+
+
+def _normalise_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _is_negated_phrase(text: str, term: str) -> bool:
+    escaped = re.escape(term)
+    patterns = [
+        rf"\bno\s+(?:more\s+)?{escaped}\b",
+        rf"\bnot\s+(?:having|experiencing)?\s*{escaped}\b",
+        rf"\bwithout\s+{escaped}\b",
+        rf"\bdenies\s+{escaped}\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def assess_text_context(text_items: list[tuple[str, Any]]) -> tuple[str, str, str]:
+    """Rule-based contextual review of free-text assessment entries.
+
+    Returns risk level, explanation and the source evidence. This intentionally
+    flags items for staff review rather than making a diagnosis.
+    """
+    evidence: list[str] = []
+    escalation: list[str] = []
+    monitoring: list[str] = []
+
+    urgent_terms = {
+        "fall": "fall or fall-related concern",
+        "fell": "fall or fall-related concern",
+        "unable to walk": "inability to walk",
+        "cannot walk": "inability to walk",
+        "chest pain": "chest pain",
+        "breathless": "breathlessness",
+        "shortness of breath": "breathlessness",
+        "faint": "fainting or near-fainting",
+        "swollen": "swelling",
+        "swelling": "swelling",
+        "red and hot": "redness and heat",
+        "wound": "wound or skin concern",
+    }
+    symptom_terms = {
+        "numb": "numbness", "pain": "pain", "cramp": "leg cramps",
+        "weak": "weakness", "dizzy": "dizziness", "tingling": "tingling",
+        "stiff": "stiffness", "ache": "aching",
+    }
+    persistence_terms = ["still", "persistent", "continues", "ongoing", "worsening", "worse", "increasing"]
+    high_frequency_terms = ["daily", "every day", "every night", "2x a week", "twice a week", "3x a week", "weekly", "frequent", "often"]
+    low_frequency_terms = ["occasionally", "once in a while", "irregular", "every 3 month", "every three month", "sometimes", "cold"]
+
+    for header, raw in text_items:
+        if is_missing(raw) or not isinstance(raw, str):
+            continue
+        text = _normalise_text(raw)
+        if not text or text in {"yes", "no", "nil", "n/a", "na"}:
+            continue
+        source = f"{header}: {str(raw).strip()}"
+
+        # Ignore entries whose meaningful symptom term is explicitly negated.
+        active_symptoms = [label for term, label in symptom_terms.items() if term in text and not _is_negated_phrase(text, term)]
+        active_urgent = [label for term, label in urgent_terms.items() if term in text and not _is_negated_phrase(text, term)]
+        affirmative = text.startswith("yes") or bool(active_symptoms) or bool(active_urgent)
+        if not affirmative:
+            continue
+
+        evidence.append(source)
+        if active_urgent:
+            escalation.extend(active_urgent)
+            continue
+
+        persistent = any(term in text for term in persistence_terms)
+        frequent = any(term in text for term in high_frequency_terms)
+        severe = any(term in text for term in ["severe", "very painful", "unbearable", "limiting", "cannot", "unable"])
+        if active_symptoms and (persistent or frequent or severe):
+            detail = ", ".join(dict.fromkeys(active_symptoms))
+            qualifier = "persistent/worsening" if persistent else "frequent" if frequent else "function-limiting or severe"
+            escalation.append(f"{qualifier} {detail}")
+        elif active_symptoms or text.startswith("yes"):
+            detail = ", ".join(dict.fromkeys(active_symptoms)) or "reported symptom"
+            if any(term in text for term in low_frequency_terms):
+                monitoring.append(f"intermittent or trigger-related {detail}")
+            else:
+                monitoring.append(detail)
+
+    if escalation:
+        reason = "Priority staff review recommended because the remarks indicate " + "; ".join(dict.fromkeys(escalation)) + "."
+        return "Escalate", reason, " | ".join(evidence)
+    if monitoring:
+        reason = "Monitor and confirm at the next contact because the remarks indicate " + "; ".join(dict.fromkeys(monitoring)) + "."
+        return "Monitor", reason, " | ".join(evidence)
+    return "No concern detected", "No concerning non-negated symptom pattern was detected in the available text fields.", ""
+
+
 def clean_header(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
@@ -300,6 +398,10 @@ def overall_result(outcomes: list[tuple[Metric, str]]) -> tuple[str, str, float,
 
 def follow_up_reason(record: dict[str, Any]) -> str:
     reasons: list[str] = []
+    if record.get("Text Risk Level") == "Escalate":
+        reasons.append(record.get("Text Risk Reason", "remarks require priority review").rstrip("."))
+    elif record.get("Text Risk Level") == "Monitor":
+        reasons.append(record.get("Text Risk Reason", "remarks require monitoring").rstrip("."))
     if record.get("Overall Outcome") == "Declined":
         reasons.append("overall assessment declined")
     if record.get("SPPB Outcome") == "Declined":
@@ -339,7 +441,7 @@ def _style_sheet(ws, headers: list[str]) -> None:
     for idx, header in enumerate(headers, start=1):
         if header == "Name":
             width = 24
-        elif header in {"Analysis Reason", "Follow-up Reason"}:
+        elif header in {"Analysis Reason", "Follow-up Reason", "Text Risk Reason", "Text Evidence"}:
             width = 50
         elif "Outcome" in header or "Domain" in header:
             width = 18
@@ -393,6 +495,19 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
             col = columns.get(clean_header(field))
             record[field] = values_ws.cell(row, col).value if col else None
 
+        text_items: list[tuple[str, Any]] = []
+        for col in range(1, values_ws.max_column + 1):
+            header_value = values_ws.cell(header_row, col).value
+            header_text = str(header_value or "").strip()
+            if any(term in clean_header(header_text) for term in TEXT_REVIEW_HEADER_TERMS):
+                value = values_ws.cell(row, col).value
+                if isinstance(value, str) and not is_missing(value):
+                    text_items.append((header_text, value))
+        text_level, text_reason, text_evidence = assess_text_context(text_items)
+        record["Text Risk Level"] = text_level
+        record["Text Risk Reason"] = text_reason
+        record["Text Evidence"] = text_evidence
+
         outcomes: list[tuple[Metric, str]] = []
         for metric in METRICS:
             pre = values_ws.cell(row, columns[clean_header(metric.pre_header)]).value
@@ -429,7 +544,7 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
         record["Critical Decline"] = any(
             record.get(field) == "Declined"
             for field in ["SPPB Outcome", "Mobility Outcome", "Overall Pain Outcome", "Frailty Outcome"]
-        )
+        ) or record.get("Text Risk Level") == "Escalate"
         record["Follow-up Reason"] = follow_up_reason(record)
         records.append(record)
 
@@ -445,9 +560,9 @@ def analyse_workbook(uploaded_bytes: bytes, selected_sheet: str | None = None):
 
     follow_cols = [
         "Name", "Gender", "Age (in 2026)", "Overall Outcome", "SPPB Outcome", "Mobility Outcome",
-        "Overall Pain Outcome", "Frailty Outcome", "Follow-up Reason",
+        "Overall Pain Outcome", "Frailty Outcome", "Text Risk Level", "Text Risk Reason", "Text Evidence", "Follow-up Reason",
     ]
-    follow_df = df[(df["Overall Outcome"] == "Declined") | df["Critical Decline"]][follow_cols]
+    follow_df = df[(df["Overall Outcome"] == "Declined") | df["Critical Decline"] | (df["Text Risk Level"] == "Monitor")][follow_cols]
     _write_dataframe_sheet(source_wb, "Follow-up List", follow_df)
 
     top_cols = [
