@@ -23,7 +23,11 @@ st.markdown(
 <style>
 .block-container {padding-top: 1.6rem; padding-bottom: 3rem;}
 [data-testid="stMetric"] {background: #ffffff; border: 1px solid #e6e9ef; padding: 14px; border-radius: 12px;}
-[data-testid="stMetricLabel"] {font-weight: 650;}
+[data-testid="stMetricLabel"] {font-weight: 650; min-height: 3.1rem; align-items: flex-start;}
+[data-testid="stMetricLabel"] > div {white-space: normal !important; overflow: visible !important; text-overflow: clip !important; line-height: 1.25 !important;}
+[data-testid="stMetricLabel"] p {white-space: normal !important; overflow: visible !important; text-overflow: clip !important; line-height: 1.25 !important;}
+[data-testid="stMetricValue"] {line-height: 1.15;}
+[data-testid="stMetricDelta"] {white-space: normal !important; overflow: visible !important; text-overflow: clip !important;}
 .small-note {color:#5f6b7a; font-size:0.92rem;}
 .section-title {font-size:1.25rem; font-weight:700; margin-top:0.4rem;}
 </style>
@@ -109,13 +113,15 @@ try:
     complete_df = df[df["Overall Outcome"] != "Insufficient Data"].copy()
     counts = df["Overall Outcome"].value_counts()
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    st.markdown('<div class="section-title">Assessment status</div>', unsafe_allow_html=True)
+    k1, k2, k3 = st.columns(3)
     k1.metric("Seniors analysed", len(df))
     k2.metric("Improved", int(counts.get("Improved", 0)))
     k3.metric("Maintained", int(counts.get("Maintained", 0)))
+    k4, k5, k6 = st.columns(3)
     k4.metric("No Change", int(counts.get("No Change", 0)))
     k5.metric("Declined", int(counts.get("Declined", 0)))
-    k6.metric("Incomplete", int(counts.get("Insufficient Data", 0)))
+    k6.metric("Incomplete assessments", int(counts.get("Insufficient Data", 0)))
 
     tabs = st.tabs(["Overview", "Frailty Impact", "Follow-up", "Top Improvers", "All Seniors", "Downloads"])
 
@@ -146,21 +152,21 @@ try:
             )
             st.caption("Percentages exclude seniors with insufficient post-assessment data.")
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Average SPPB change", f"{complete_df['SPPB Change'].mean():+.2f}" if not complete_df.empty else "N/A")
+        st.markdown('<div class="section-title">Programme impact indicators</div>', unsafe_allow_html=True)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Average SPPB score change", f"{complete_df['SPPB Change'].mean():+.2f}" if not complete_df.empty else "N/A")
         m2.metric(
-            "Average overall pain change",
+            "Average overall pain score change",
             f"{complete_df['Overall Pain Change'].mean():+.2f}" if not complete_df.empty else "N/A",
-            help="A negative value means pain reduced.",
+            help="A negative value means that average pain reduced.",
         )
         m3.metric(
-            "Average health-score change",
+            "Average overall health score change",
             f"{complete_df['Health Score Change'].mean():+.2f}" if not complete_df.empty else "N/A",
         )
         frailty_available = df["Frailty Outcome"].isin(["Improved", "No Change", "Declined"])
         frailty_improved = int((df.loc[frailty_available, "Frailty Outcome"] == "Improved").sum())
         frailty_total = int(frailty_available.sum())
-        m4.metric("Frailty status improved", f"{frailty_improved}/{frailty_total}" if frailty_total else "N/A")
         recovered_count = int(df["Recovered from Frailty"].sum())
         verified_recovered = int(((df["Recovered from Frailty"]) & df["SPPB Change"].notna()).sum())
         pre_frail_complete = df[
@@ -168,7 +174,17 @@ try:
             & df["Frailty Status 2"].notna()
         ]
         recovery_rate = verified_recovered / len(pre_frail_complete) if len(pre_frail_complete) else 0
-        m5.metric("Verified frail → normal", verified_recovered, delta=f"{recovery_rate:.1%} of pre-frail seniors")
+
+        m4, m5 = st.columns(2)
+        m4.metric(
+            "Seniors with improved frailty status",
+            f"{frailty_improved} of {frailty_total}" if frailty_total else "N/A",
+        )
+        m5.metric(
+            "Verified transitions from frail to normal",
+            verified_recovered,
+            delta=f"{recovery_rate:.1%} of seniors who were frail before BIXEPS",
+        )
 
         domain_cols = ["Physical Function Domain", "Pain Domain", "Daily Living Domain", "Wellbeing Domain"]
         domain_rows = []
