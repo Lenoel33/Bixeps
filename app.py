@@ -4,6 +4,7 @@ import io
 import re
 from pathlib import Path
 import gc
+import html
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +31,47 @@ st.markdown(
 [data-testid="stMetricDelta"] {white-space: normal !important; overflow: visible !important; text-overflow: clip !important;}
 .small-note {color:#5f6b7a; font-size:0.92rem;}
 .section-title {font-size:1.25rem; font-weight:700; margin-top:0.4rem;}
+.wrapped-table-container {
+    width: 100%;
+    max-height: 600px;
+    overflow: auto;
+    border: 1px solid #e3e7ed;
+    border-radius: 10px;
+    background: white;
+}
+.wrapped-table {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: max-content;
+    min-width: 100%;
+    font-size: 0.93rem;
+}
+.wrapped-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f4f6f8;
+    color: #2f3542;
+    font-weight: 700;
+    text-align: left;
+    border-bottom: 1px solid #dfe3e8;
+    padding: 10px 12px;
+    white-space: normal;
+}
+.wrapped-table td {
+    vertical-align: top;
+    padding: 10px 12px;
+    border-bottom: 1px solid #edf0f3;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    line-height: 1.45;
+}
+.wrapped-table tr:nth-child(even) td {background: #fafbfc;}
+.wrapped-table tr:hover td {background: #f5f9ff;}
+.wrapped-table .short-col {min-width: 105px; max-width: 150px;}
+.wrapped-table .medium-col {min-width: 170px; max-width: 260px;}
+.wrapped-table .long-col {min-width: 360px; max-width: 620px;}
 </style>
 """,
     unsafe_allow_html=True,
@@ -42,6 +84,73 @@ def clear_uploaded_data() -> None:
     """Remove uploaded data from the active Streamlit session and rerun cleanly."""
     st.session_state.uploader_key += 1
     gc.collect()
+
+
+def render_wrapped_table(
+    dataframe: pd.DataFrame,
+    *,
+    height: int = 560,
+    percentage_columns: tuple[str, ...] = (),
+) -> None:
+    """Render a scrollable HTML table with fully wrapped text.
+
+    Streamlit's standard dataframe grid truncates long paragraph fields. This
+    renderer escapes workbook content, wraps every cell, and gives narrative
+    columns additional width so the complete reasons remain readable.
+    """
+    table_df = dataframe.copy()
+    for column in percentage_columns:
+        if column in table_df.columns:
+            table_df[column] = table_df[column].apply(
+                lambda value: "" if pd.isna(value) else f"{float(value):.0%}"
+            )
+
+    long_keywords = (
+        "reason", "evidence", "remark", "recommendation",
+        "explanation", "follow-up",
+    )
+    medium_keywords = (
+        "transition", "domain", "outcome", "status", "risk",
+    )
+
+    headers = []
+    for column in table_df.columns:
+        lowered = str(column).casefold()
+        if any(keyword in lowered for keyword in long_keywords):
+            css_class = "long-col"
+        elif any(keyword in lowered for keyword in medium_keywords):
+            css_class = "medium-col"
+        else:
+            css_class = "short-col"
+        headers.append(f'<th class="{css_class}">{html.escape(str(column))}</th>')
+
+    rows = []
+    for _, row in table_df.iterrows():
+        cells = []
+        for column, value in row.items():
+            lowered = str(column).casefold()
+            if any(keyword in lowered for keyword in long_keywords):
+                css_class = "long-col"
+            elif any(keyword in lowered for keyword in medium_keywords):
+                css_class = "medium-col"
+            else:
+                css_class = "short-col"
+            if pd.isna(value):
+                display_value = ""
+            else:
+                display_value = html.escape(str(value)).replace("\n", "<br>")
+            cells.append(f'<td class="{css_class}">{display_value}</td>')
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    table_html = (
+        f'<div class="wrapped-table-container" style="max-height:{height}px">'
+        '<table class="wrapped-table"><thead><tr>'
+        + "".join(headers)
+        + "</tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table></div>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 st.title("📊 BIXEPS Assessment Analyser")
 st.caption(
@@ -236,7 +345,7 @@ try:
                 "Name", "Gender", "Age (in 2026)", "Frailty Transition", "Frailty Evidence", "SPPB Pre", "SPPB Post",
                 "SPPB Change", "Overall Outcome", "Analysis Reason",
             ]
-            st.dataframe(recovered[frailty_cols], use_container_width=True, hide_index=True, height=420)
+            render_wrapped_table(recovered[frailty_cols], height=440)
             st.download_button(
                 "Download frailty improvement list (CSV)",
                 recovered[frailty_cols].to_csv(index=False).encode("utf-8-sig"),
@@ -258,7 +367,7 @@ try:
         if text_review.empty:
             st.success("No written remarks were flagged for review.")
         else:
-            st.dataframe(text_review, use_container_width=True, hide_index=True, height=460)
+            render_wrapped_table(text_review, height=480)
             st.download_button(
                 "Download remarks review list (CSV)",
                 text_review.to_csv(index=False).encode("utf-8-sig"),
@@ -282,7 +391,7 @@ try:
                 "Overall Pain Outcome", "Mobility Outcome", "Frailty Outcome", "Frailty Transition",
                 "Text Risk Level", "Text Risk Reason", "Text Evidence", "Follow-up Reason", "Analysis Reason",
             ]
-            st.dataframe(follow_df[cols], use_container_width=True, hide_index=True)
+            render_wrapped_table(follow_df[cols], height=560)
             st.download_button(
                 "Download follow-up list (CSV)",
                 follow_df[cols].to_csv(index=False).encode("utf-8-sig"),
@@ -299,7 +408,7 @@ try:
             "Name", "Overall Outcome", "Improvement Score", "Improved Areas", "Declined Areas",
             "SPPB Change", "Overall Pain Change", "Health Score Change", "Analysis Reason",
         ]
-        st.dataframe(ranked[top_cols], use_container_width=True, hide_index=True)
+        render_wrapped_table(ranked[top_cols], height=520)
 
     with tabs[5]:
         st.markdown('<div class="section-title">Complete senior-level analysis with reasons</div>', unsafe_allow_html=True)
@@ -316,12 +425,12 @@ try:
             "Improved Areas", "Declined Areas", "Data Completeness", "Text Risk Level", "Text Risk Reason", "Text Evidence",
             "Analysis Reason", "Physical Function Reason", "Pain Reason", "Daily Living Reason", "Wellbeing Reason",
         ]
-        st.dataframe(
-            view_df[display_columns].style.format({"Data Completeness": "{:.0%}"}),
-            use_container_width=True,
-            hide_index=True,
-            height=560,
+        render_wrapped_table(
+            view_df[display_columns],
+            height=620,
+            percentage_columns=("Data Completeness",),
         )
+        st.caption("All narrative fields wrap automatically. Scroll horizontally for additional columns and vertically for more seniors.")
 
     with tabs[6]:
         st.markdown('<div class="section-title">Download reports</div>', unsafe_allow_html=True)
